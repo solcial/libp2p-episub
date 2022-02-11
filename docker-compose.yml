@@ -1,0 +1,58 @@
+version: '3'
+
+services:
+  
+  # p2p audit node
+  # monitors all traffic in p2p
+  node_audit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ./audit-node
+    environment:
+      - RUST_BACKTRACE=1
+    networks:
+      testing_net:
+        ipv4_address: 172.28.1.1
+    ports:
+      - "80:80"
+
+  # global bootstrap node
+  node_0:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ./episub-node --topic t0 --audit 172.28.1.1:9000 -v --size 100 --sender
+    environment:
+      - RUST_BACKTRACE=1
+    depends_on:
+      node_audit: # wait for audit node to start
+        condition: service_started
+    networks:
+      testing_net:
+        ipv4_address: 172.28.1.2
+
+  # peer node
+  # when running use --scale node_n=N, where N is between 1-1000
+  node_n:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ./episub-node --bootstrap /ip4/172.28.1.2/tcp/4001 --audit 172.28.1.1:9000 --topic t0 -v --size 100
+    environment:
+      - RUST_BACKTRACE=1
+    depends_on:
+      node_audit: # wait for audit node to start
+        condition: service_started
+      node_0: # wait for bootstrap node to start
+        condition: service_started
+    networks:
+      testing_net:
+        
+
+networks:
+  testing_net:
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16

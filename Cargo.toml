@@ -1,0 +1,26 @@
+[package]
+name = "libp2p-episub"
+version = "0.1.12"
+edition = "2021"
+rust-version = "1.56.1"
+authors = ["Karim Agha <karim.dev@gmail.com>"]
+license = "MIT"
+description = "Episub: Proximity Aware Epidemic PubSub for libp2p"
+keywords = ["peer-to-peer", "libp2p", "networking"]
+categories = ["network-programming", "asynchornous"]
+exclude = ["test", "docker-compose.yml", "Dockerfile"]
+
+[dependencies]
+futures = "0.3.18"
+libp2p-core = "0.31.0"
+libp2p-swarm = "0.33.0"
+multiaddr = "0.13.0"
+tracing = "0.1.29"
+prost = "0.9"
+rand = "0.8"
+thiserror = "1.0.30"
+asynchronous-codec = "0.6"
+unsigned-varint = { version = "0.7.0", features = ["asynchronous_codec"] }
+
+[build-dependencies]
+prost-build = "0.9"

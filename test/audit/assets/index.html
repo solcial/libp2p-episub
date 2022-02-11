@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>P2P Protocols Lab</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.20.0/cytoscape.min.js"
+    integrity="sha512-cjmYAonfXK+azDmWqvnqq8xmygHRHqVI7S0zuRxQnvcYVeoakwthRX6pPKoXfG1oIjDvMUtteRV9PhQjJwKWxQ=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet"
+    integrity="sha384-1BmE4kWBq78iYhFldvKuhfTAU6auU8tT94WrHftjDbrCEXSU1oBoqyl2QvZ6jIW3" crossorigin="anonymous">
+  </link>
+  <style>
+    body {
+      font-family: helvetica;
+      font-size: 14px;
+    }
+
+    #cy {
+      width: 100%;
+      height: 100%;
+      position: fixed;
+      left: 0;
+      top: 0;
+      z-index: 999;
+    }
+
+    h1 {
+      opacity: 0.5;
+      font-size: 2em;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>P2P Protocols Lab</h1>
+  <div class="container">
+    <div id="cy"></div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"
+    integrity="sha384-ka7Sk0Gln4gmtz2MlQnikT1wXgYsOg+OMhuP+IlRH9sENBO0LRn5q+8nbTov4+1p"
+    crossorigin="anonymous"></script>
+
+  <script>
+    console.log('p2p lab started')
+    var cy = window.cy = cytoscape({
+      container: document.getElementById('cy'),
+      elements: [],
+      style: [ // the stylesheet for the graph
+        {
+          selector: 'node',
+          style: {
+            'background-color': '#666',
+            'label': 'data(id)',
+            'font-size': '8px',
+            'text-max-width': '50px',
+            'text-wrap': 'fade ellipsis'
+          }
+        },
+
+        {
+          selector: 'edge',
+          style: {
+            'width': 1,
+            'line-color': '#ccc',
+            'target-arrow-color': '#ccc',
+            'target-arrow-shape': 'triangle',
+            'curve-style': 'bezier'
+          }
+        }
+      ],
+
+      layout: {
+        name: 'circle',
+      }
+    });
+
+    var letter1 = 'a';
+    var letter2 = 'b';
+
+    function nextChar(c) {
+      return String.fromCharCode(c.charCodeAt(0) + 1);
+    }
+
+    var nodes = new Set();
+    var edges = new Set();
+
+    const addNode = (nodeid) => {
+      if (!nodes.has(nodeid)) {
+        cy.add({
+          group: 'nodes',
+          data: {
+            id: nodeid
+          }
+        })
+        nodes.add(nodeid);
+        const layout = cy.layout({
+          name: 'circle',
+        });
+        layout.run();
+      }
+    }
+
+    const removeNode = (nodeid) => {
+      if (nodes.has(nodeid)) {
+        cy.remove('[id="' + nodeid + '"]');
+        nodes.remove(nodeid);
+        const layout = cy.layout({
+          name: 'circle',
+        });
+        layout.run();
+      }
+    }
+
+    const addMessage = (from, to) => {
+      const id = from + '-' + to;
+      if (!edges.has(id)) {
+        cy.add({
+          group: 'edges',
+          data: {
+            id: id,
+            source: from,
+            target: to
+          }
+        })
+        edges.add(id);
+      }
+    }
+
+    const removeMessage = (from, to) => {
+      const id = from + '-' + to;
+      if (edges.has(id)) {
+        cy.remove('[id="' + id + '"]')
+        edges.delete(id);
+      }
+    }
+
+    var socket = new WebSocket('ws://' + location.host + '/stream');
+    socket.onopen = (event) => {
+      console.log('socket opened ', event)
+    }
+
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      console.log('got message: ', data);
+
+      if (data.event === "Up") {
+        addNode(data.node_id);
+      }
+
+      if (data.event === "Down") {
+        removeNode(data.node_id);
+      }
+
+      if (data.event === "Connected") {
+        addNode(data.node_id);
+        addNode(data.peer_id);
+        addMessage(data.node_id, data.peer_id);
+      }
+
+      if (data.event === "Disconnected") {
+        removeMessage(data.node_id, data.peer_id);
+      }
+    }
+  </script>
+</body>
+
+</html>
