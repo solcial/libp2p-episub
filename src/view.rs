@@ -117,7 +117,7 @@ impl HyParView {
   /// a random node from the active view and makes space for the new
   /// node.
   fn free_up_active_slot(&mut self) {
-    if self.starved() {
+    if !self.starved() {
       let random = self.passive.iter().choose(&mut rand::thread_rng()).cloned();
       if let Some(random) = random {
         debug!(
