@@ -22,9 +22,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ./episub-node --topic t0 --audit 172.28.1.1:9000 -v --size 100 --sender
+    command: ./episub-node -t t0 -t t1 --audit 172.28.1.1:9000 --size 100 --sender
     environment:
       - RUST_BACKTRACE=1
+      - "RUST_LOG=debug,netlink_proto=info"
     depends_on:
       node_audit: # wait for audit node to start
         condition: service_started
@@ -33,14 +34,16 @@ services:
         ipv4_address: 172.28.1.2
 
   # peer node
-  # when running use --scale node_n=N, where N is between 1-1000
-  node_n:
+  # when running use --scale node_t0=N, where N is between 1-1000
+  node_t0:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ./episub-node --bootstrap /ip4/172.28.1.2/tcp/4001 --audit 172.28.1.1:9000 --topic t0 -v --size 100
+    command: ./episub-node --bootstrap /ip4/172.28.1.2/tcp/4001 --audit 172.28.1.1:9000 --topic t0 --size 100
     environment:
       - RUST_BACKTRACE=1
+      - "RUST_LOG=debug,netlink_proto=info"
+    depends_on:
     depends_on:
       node_audit: # wait for audit node to start
         condition: service_started
@@ -49,6 +52,21 @@ services:
     networks:
       testing_net:
         
+  node_t1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ./episub-node --bootstrap /ip4/172.28.1.2/tcp/4001 --audit 172.28.1.1:9000 --topic t1 --size 100
+    environment:
+      - RUST_BACKTRACE=1
+      - "RUST_LOG=debug,netlink_proto=info"
+    depends_on:
+      node_audit: # wait for audit node to start
+        condition: service_started
+      node_0: # wait for bootstrap node to start
+        condition: service_started
+    networks:
+      testing_net:
 
 networks:
   testing_net:
