@@ -3,6 +3,7 @@ use crate::{
   topic::TopicMesh, view::AddressablePeer,
 };
 use futures::FutureExt;
+use libp2p_core::multiaddr::Protocol;
 use libp2p_core::{
   connection::{ConnectionId, ListenerId},
   ConnectedPoint, Multiaddr, PeerId,
@@ -11,7 +12,6 @@ use libp2p_swarm::{
   CloseConnection, DialError, NetworkBehaviour, NetworkBehaviourAction,
   NotifyHandler, PollParameters,
 };
-use multiaddr::Protocol;
 use rand::Rng;
 use std::{
   collections::{HashMap, HashSet, VecDeque},
@@ -212,10 +212,10 @@ impl Episub {
 }
 
 impl NetworkBehaviour for Episub {
-  type ProtocolsHandler = EpisubHandler;
+  type ConnectionHandler = EpisubHandler;
   type OutEvent = EpisubEvent;
 
-  fn new_handler(&mut self) -> Self::ProtocolsHandler {
+  fn new_handler(&mut self) -> Self::ConnectionHandler {
     EpisubHandler::new(self.config.max_transmit_size, false)
   }
 
@@ -225,6 +225,7 @@ impl NetworkBehaviour for Episub {
     connection: &ConnectionId,
     endpoint: &ConnectedPoint,
     _failed_addresses: Option<&Vec<Multiaddr>>,
+    _other_established: usize,
   ) {
     if self.banned_peers.contains(peer_id) {
       self.force_disconnect(*peer_id, *connection);
@@ -289,7 +290,7 @@ impl NetworkBehaviour for Episub {
   fn inject_dial_failure(
     &mut self,
     peer_id: Option<PeerId>,
-    _: Self::ProtocolsHandler,
+    _: Self::ConnectionHandler,
     error: &DialError,
   ) {
     if !matches!(error, DialError::DialPeerConditionFalse(_)) {
@@ -309,6 +310,7 @@ impl NetworkBehaviour for Episub {
     _: &ConnectionId,
     endpoint: &ConnectedPoint,
     _: EpisubHandler,
+    _remaining_established: usize,
   ) {
     debug!(
       "Connection to peer {} closed on endpoint {:?}",
@@ -395,7 +397,7 @@ impl NetworkBehaviour for Episub {
     &mut self,
     cx: &mut Context<'_>,
     params: &mut impl PollParameters,
-  ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ProtocolsHandler>> {
+  ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ConnectionHandler>> {
     // update local peer identity and addresses
     self.update_local_node_info(params);
 

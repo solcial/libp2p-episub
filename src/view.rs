@@ -6,12 +6,11 @@ use crate::{
   handler::EpisubHandler, rpc, EpisubEvent,
 };
 use futures::Future;
-use libp2p_core::PeerId;
+use libp2p_core::{Multiaddr, PeerId};
 use libp2p_swarm::{
   dial_opts::{DialOpts, PeerCondition},
   NotifyHandler,
 };
-use multiaddr::Multiaddr;
 use rand::prelude::IteratorRandom;
 use std::{
   collections::{HashSet, VecDeque},
