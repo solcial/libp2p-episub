@@ -187,7 +187,7 @@ impl PlumTree {
   }
 
   pub fn inject_graft(&mut self, peer_id: PeerId, ids: Vec<u128>) {
-    // updgrade to eager node after graft
+    // upgrade to eager node after graft
     self.lazy.remove(&peer_id);
     self.eager.insert(peer_id);
 

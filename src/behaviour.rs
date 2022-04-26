@@ -19,7 +19,7 @@ use std::{
   net::{Ipv4Addr, Ipv6Addr},
   task::{Context, Poll},
 };
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 /// Event that can be emitted by the episub behaviour.
 #[derive(Debug)]
@@ -30,7 +30,7 @@ pub enum EpisubEvent {
     payload: Vec<u8>,
   },
   Subscribed(String),
-  Unsubscibed(String),
+  Unsubscribed(String),
   PeerAdded(PeerId),
   PeerRemoved(PeerId),
 }
@@ -121,7 +121,7 @@ impl Episub {
   /// Subscribes to a gossip topic.
   ///
   /// Gossip topics are isolated clusters of nodes that gossip information, each topic
-  /// maintins a separate HyParView of topic member nodes and does not interact with
+  /// maintains a separate HyParView of topic member nodes and does not interact with
   /// nodes from other topics (unless two nodes are subscribed to the same topic, but
   /// even then, they are not aware of the dual subscription).
   ///
@@ -189,7 +189,7 @@ impl Episub {
       self
         .out_events
         .push_back(EpisubNetworkBehaviourAction::GenerateEvent(
-          EpisubEvent::Unsubscibed(topic),
+          EpisubEvent::Unsubscribed(topic),
         ));
 
       true
@@ -377,6 +377,7 @@ impl NetworkBehaviour for Episub {
       // then closing connection to the peer. That will also remove
       // this node from the requesting peer's passive view, so we won't
       // be bothered again by this peer for this topic.
+      info!("RPC with wrong topic {} - forcing disconnect", &event.topic);
       self
         .out_events
         .push_back(EpisubNetworkBehaviourAction::NotifyHandler {
