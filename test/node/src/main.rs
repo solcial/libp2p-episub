@@ -25,16 +25,8 @@ static DEFAULT_BOOTSTRAP_NODE: &str = "/dnsaddr/bootstrap.libp2p.io";
 
 #[derive(Debug, StructOpt)]
 struct CliOptions {
-  #[structopt(
-    short,
-    long,
-    parse(from_occurrences),
-    help = "Use verbose output (-vv very verbose output)"
-  )]
-  pub verbose: u64,
-
-  #[structopt(long, about = "gossip topic name")]
-  topic: String,
+  #[structopt(short, long, about = "gossip topic name")]
+  topic: Vec<String>,
 
   #[structopt(long, default_value=DEFAULT_BOOTSTRAP_NODE, about = "p2p bootstrap peers")]
   bootstrap: Vec<Multiaddr>,
@@ -64,20 +56,14 @@ async fn send_update(addr: &str, update: NodeUpdate) -> Result<()> {
 async fn main() -> Result<()> {
   let opts = CliOptions::from_args();
 
-  tracing_subscriber::fmt()
-    .with_max_level(match opts.verbose {
-      1 => Level::DEBUG,
-      2 => Level::TRACE,
-      _ => Level::INFO,
-    })
-    .init();
+  tracing_subscriber::fmt::init();
 
   let local_key = identity::Keypair::generate_ed25519();
   let local_peer_id = PeerId::from(local_key.public());
 
   info!("Local peer id: {:?}", local_peer_id);
   info!("Bootstrap nodes: {:?}", opts.bootstrap);
-  info!("Gossip Topic: {}", opts.topic);
+  info!("Gossip Topics: {:?}", opts.topic);
 
   // Set up an encrypted TCP Transport over the Mplex and Yamux protocols
   let transport = libp2p::development_transport(local_key.clone()).await?;
@@ -113,7 +99,9 @@ async fn main() -> Result<()> {
     .unwrap();
 
   // subscribe to the topic specified on the command line
-  swarm.behaviour_mut().subscribe(opts.topic.clone());
+  opts.topic.iter().for_each(|t| {
+    swarm.behaviour_mut().subscribe(t.clone());
+  });
 
   // dial all bootstrap nodes
   opts
@@ -142,6 +130,7 @@ async fn main() -> Result<()> {
     }
   });
 
+  let mut i = 0;
   // run the libp2p event loop in conjunction with our send loop
   loop {
     tokio::select! {
@@ -184,7 +173,8 @@ async fn main() -> Result<()> {
       },
       Some(sendmsg) = msg_rx.recv() => {
         if opts.sender {
-          swarm.behaviour_mut().publish(&opts.topic, sendmsg)?;
+          swarm.behaviour_mut().publish(&opts.topic[i], sendmsg)?;
+          i = (i + 1) % opts.topic.len();
         }
       },
     };

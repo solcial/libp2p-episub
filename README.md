@@ -11,7 +11,7 @@ Originally [speced by @vyzo](https://github.com/libp2p/specs/blob/master/pubsub/
 ## Running a topology with 201 peers:
 
 ```
-$ docker-compose up --scale node_n=200 --remove-orphans
+$ docker-compose up --scale node_t0=200 --remove-orphans
 ```
 
 
@@ -32,7 +32,7 @@ $ docker-compose up -d node_0
 You should see it immediately showing up in the labs page, then start 50 peer nodes and watch the network discover itself.
 
 ```
-$ docker-compose up --scale node_n=50
+$ docker-compose up --scale node_t0=50
 ```
 
 

@@ -12,7 +12,7 @@ categories = ["network-programming", "asynchornous"]
 [dependencies]
 libp2p-episub = { path = "../../" }
 
-libp2p = "0.41.0"
+libp2p = "0.44.0"
 anyhow = "1.0.51"
 tracing = "0.1.29"
 headers = "0.3"
