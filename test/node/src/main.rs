@@ -15,7 +15,10 @@ use std::{intrinsics::transmute, mem::size_of, time::Duration};
 use anyhow::Result;
 use audit_node::{NodeEvent, NodeUpdate};
 use futures::StreamExt;
-use libp2p::{identity, swarm::SwarmEvent, Multiaddr, PeerId};
+use libp2p::{
+  identity, noise, swarm::Swarm, swarm::SwarmEvent, tcp, tls, yamux, Multiaddr,
+  PeerId,
+};
 use libp2p_episub::{Config, Episub, EpisubEvent};
 use structopt::StructOpt;
 use tokio::{net::UdpSocket, sync::mpsc::unbounded_channel};
@@ -65,9 +68,6 @@ async fn main() -> Result<()> {
   info!("Bootstrap nodes: {:?}", opts.bootstrap);
   info!("Gossip Topics: {:?}", opts.topic);
 
-  // Set up an encrypted TCP Transport over the Mplex and Yamux protocols
-  let transport = libp2p::development_transport(local_key.clone()).await?;
-
   info!("audit addr: {:?}", opts.audit);
 
   send_update(
@@ -84,14 +84,29 @@ async fn main() -> Result<()> {
   });
 
   // Create a Swarm to manage peers and events
-  let mut swarm = libp2p::Swarm::new(
-    transport,
-    Episub::new(Config {
-      network_size: opts.size,
-      ..Config::default()
-    }),
-    local_peer_id,
-  );
+  let mut swarm: Swarm<_> =
+    libp2p::SwarmBuilder::with_existing_identity(local_key.clone())
+      .with_async_std()
+      .with_tcp(
+        tcp::Config::default(),
+        noise::Config::new,
+        yamux::Config::default,
+      )?
+      .with_websocket(tls::Config::new, yamux::Config::default)
+      .await?
+      .with_behaviour(|k| {
+        Episub::new1(
+          Config {
+            network_size: opts.size,
+            ..Config::default()
+          },
+          PeerId::from(k.public()),
+        )
+      })?
+      .with_swarm_config(|c| {
+        c.with_idle_connection_timeout(Duration::from_secs(5))
+      })
+      .build();
 
   // Listen on all interfaces and whatever port the OS assigns
   swarm

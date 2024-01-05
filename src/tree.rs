@@ -2,7 +2,7 @@
 //! Leitão, João & Pereira, José & Rodrigues, Luís. (2007).
 //! 301-310. 10.1109/SRDS.2007.27.
 
-use libp2p_core::PeerId;
+use libp2p_identity::PeerId;
 use libp2p_swarm::NotifyHandler;
 use tracing::{debug, error};
 

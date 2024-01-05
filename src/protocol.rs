@@ -17,11 +17,11 @@ impl EpisubProtocol {
 }
 
 impl UpgradeInfo for EpisubProtocol {
-  type Info = &'static [u8];
+  type Info =&'static str; //&'static [u8];
   type InfoIter = iter::Once<Self::Info>;
 
   fn protocol_info(&self) -> Self::InfoIter {
-    iter::once(b"/beta/episub/1.0.0")
+    iter::once("/beta/episub/1.0.0")
   }
 }
 

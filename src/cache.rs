@@ -1,4 +1,4 @@
-use libp2p_core::PeerId;
+use libp2p_identity::PeerId;
 use std::{
   cmp::Ordering,
   collections::{hash_map::Entry, HashMap, VecDeque},

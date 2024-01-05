@@ -6,7 +6,8 @@ use crate::{
   handler::EpisubHandler, rpc, EpisubEvent,
 };
 use futures::Future;
-use libp2p_core::{Multiaddr, PeerId};
+use libp2p_core::Multiaddr;
+use libp2p_identity::PeerId;
 use libp2p_swarm::{
   dial_opts::{DialOpts, PeerCondition},
   NotifyHandler,
@@ -443,7 +444,6 @@ impl HyParView {
               .addresses(node.addresses.into_iter().collect())
               .condition(PeerCondition::Disconnected)
               .build(),
-            handler: EpisubHandler::new(self.config.max_transmit_size, false),
           });
 
         self.out_events.push_back(
@@ -531,7 +531,6 @@ impl HyParView {
             .addresses(origin.addresses.into_iter().collect())
             .condition(PeerCondition::Disconnected)
             .build(),
-          handler: EpisubHandler::new(self.config.max_transmit_size, true),
         });
     }
 

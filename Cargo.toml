@@ -14,9 +14,10 @@ exclude = ["test", "docker-compose.yml", "Dockerfile"]
 
 [dependencies]
 futures = "0.3.18"
-libp2p-core = "0.32.0"
-libp2p-swarm = "0.35.0"
-multiaddr = "0.13.0"
+libp2p-core = {version="0.41.2" }
+libp2p-swarm = {version="0.44.1" }
+libp2p-identity = { version="0.2.8", features = ["peerid", "ed25519"] }
+multiaddr = "0.18.1"
 tracing = "0.1.29"
 prost = "0.9"
 rand = "0.8"

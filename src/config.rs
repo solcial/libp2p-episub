@@ -1,4 +1,4 @@
-use libp2p_core::PeerId;
+use libp2p_identity::PeerId;
 use std::{sync::Arc, time::Duration};
 
 #[derive(Clone)]

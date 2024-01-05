@@ -21,7 +21,7 @@
 //! let transport = libp2p::development_transport(local_key.clone()).await?;
 //!
 //! // Create a Swarm to manage peers and events
-//! let mut swarm = libp2p::Swarm::new(transport, Episub::new(), local_peer_id);
+//! let mut swarm = libp2p::Swarm::new(transport, Episub::new1(local_peer_id), local_peer_id);
 //!
 //! // Listen on all interfaces and whatever port the OS assigns
 //! swarm
