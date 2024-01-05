@@ -1,4 +1,4 @@
-use libp2p_core::PeerId;
+use libp2p_identity::PeerId;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

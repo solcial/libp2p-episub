@@ -4,11 +4,12 @@ use crate::{
 use asynchronous_codec::Framed;
 use futures::{Sink, StreamExt};
 use libp2p_core::{InboundUpgrade, OutboundUpgrade};
-use libp2p_swarm::{
-  KeepAlive, NegotiatedSubstream, ConnectionHandler, 
-  SubstreamProtocol, ConnectionHandlerEvent, ConnectionHandlerUpgrErr
+use libp2p_swarm::handler::{FullyNegotiatedInbound, FullyNegotiatedOutbound, DialUpgradeError, ListenUpgradeError, InboundUpgradeSend, ProtocolSupport};
+use libp2p_swarm::{ handler::ConnectionEvent,
+   Stream, ConnectionHandler, 
+  SubstreamProtocol, ConnectionHandlerEvent, StreamUpgradeError
 };
-use libp2p_swarm::{};
+use libp2p_swarm::{StreamProtocol,AddressChange};
 use std::{
   collections::VecDeque,
   io,
@@ -20,9 +21,9 @@ use tracing::{error, warn};
 /// State of the inbound substream, opened either by us or by the remote.
 enum InboundSubstreamState {
   /// Waiting for a message from the remote. The idle state for an inbound substream.
-  WaitingInput(Framed<NegotiatedSubstream, EpisubCodec>),
+  WaitingInput(Framed<Stream, EpisubCodec>),
   /// The substream is being closed.
-  Closing(Framed<NegotiatedSubstream, EpisubCodec>),
+  Closing(Framed<Stream, EpisubCodec>),
   /// An error occurred during processing.
   Poisoned,
 }
@@ -32,13 +33,13 @@ enum OutboundSubstreamState {
   // upgrade requested and waiting for the upgrade to be negotiated.
   SubstreamRequested,
   /// Waiting for the user to send a message. The idle state for an outbound substream.
-  WaitingOutput(Framed<NegotiatedSubstream, EpisubCodec>),
+  WaitingOutput(Framed<Stream, EpisubCodec>),
   /// Waiting to send a message to the remote.
-  PendingSend(Framed<NegotiatedSubstream, EpisubCodec>, crate::rpc::Rpc),
+  PendingSend(Framed<Stream, EpisubCodec>, crate::rpc::Rpc),
   /// Waiting to flush the substream so that the data arrives to the remote.
-  PendingFlush(Framed<NegotiatedSubstream, EpisubCodec>),
+  PendingFlush(Framed<Stream, EpisubCodec>),
   /// The substream is being closed. Used by either substream.
-  _Closing(Framed<NegotiatedSubstream, EpisubCodec>),
+  _Closing(Framed<Stream, EpisubCodec>),
   /// An error occurred during processing.
   Poisoned,
 }
@@ -53,7 +54,7 @@ pub struct EpisubHandler {
   inbound_substream: Option<InboundSubstreamState>,
   /// Whether we want the peer to have strong live connection to us.
   /// This changes when a peer is moved from the active view to the passive view.
-  keep_alive: KeepAlive,
+  keep_alive: bool,
   /// The list of messages scheduled to be sent to this peer
   outbound_queue: VecDeque<rpc::Rpc>,
 }
@@ -61,8 +62,7 @@ pub struct EpisubHandler {
 type EpisubHandlerEvent = ConnectionHandlerEvent<
   <EpisubHandler as ConnectionHandler>::OutboundProtocol,
   <EpisubHandler as ConnectionHandler>::OutboundOpenInfo,
-  <EpisubHandler as ConnectionHandler>::OutEvent,
-  <EpisubHandler as ConnectionHandler>::Error,
+  <EpisubHandler as ConnectionHandler>::ToBehaviour  
 >;
 
 impl EpisubHandler {
@@ -74,8 +74,8 @@ impl EpisubHandler {
         (),
       ),
       keep_alive: match temporary {
-        false => KeepAlive::Yes,
-        true => KeepAlive::No,
+        false => true,
+        true => false,
       },
       outbound_substream: None,
       inbound_substream: None,
@@ -85,9 +85,9 @@ impl EpisubHandler {
 }
 
 impl ConnectionHandler for EpisubHandler {
-  type InEvent = rpc::Rpc;
-  type OutEvent = rpc::Rpc;
-  type Error = EpisubHandlerError;
+
+  type FromBehaviour = rpc::Rpc;
+  type ToBehaviour = rpc::Rpc;
   type InboundOpenInfo = ();
   type InboundProtocol = EpisubProtocol;
   type OutboundOpenInfo = ();
@@ -99,57 +99,73 @@ impl ConnectionHandler for EpisubHandler {
     self.listen_protocol.clone()
   }
 
-  fn inject_fully_negotiated_inbound(
-    &mut self,
-    substream: <Self::InboundProtocol as InboundUpgrade<NegotiatedSubstream>>::Output,
-    _: Self::InboundOpenInfo,
-  ) {
-    self.inbound_substream =
-      Some(InboundSubstreamState::WaitingInput(substream))
-  }
-
-  fn inject_fully_negotiated_outbound(
-    &mut self,
-    substream: <Self::OutboundProtocol as OutboundUpgrade<
-      NegotiatedSubstream,
-    >>::Output,
-    _: Self::OutboundOpenInfo,
-  ) {
-    self.outbound_substream =
-      Some(OutboundSubstreamState::WaitingOutput(substream));
-  }
-
-  fn inject_event(&mut self, event: Self::InEvent) {
-    if self.keep_alive != KeepAlive::Yes {
-      // temporary connection are only for
-      // shuffle replies. Don't permit any
-      // outgoing message other than shuffle
-      // reply
-      if let rpc::Rpc {
-        action: Some(rpc::rpc::Action::ShuffleReply(_)),
-        ..
-      } = event
-      {
-        self.outbound_queue.push_back(event);
+    /// Informs the handler about an event from the [`NetworkBehaviour`](super::NetworkBehaviour).
+    fn on_behaviour_event(&mut self, _event: Self::FromBehaviour)
+    {
+      if !self.keep_alive {
+        // temporary connection are only for
+        // shuffle replies. Don't permit any
+        // outgoing message other than shuffle
+        // reply
+       
+        if let rpc::Rpc {
+          action: Some(rpc::rpc::Action::ShuffleReply(_)),
+          ..
+        } = _event
+        {
+          self.outbound_queue.push_back(_event);
+        }
+        
+      } else {
+        self.outbound_queue.push_back(_event);
       }
-    } else {
-      self.outbound_queue.push_back(event);
     }
-  }
 
-  fn inject_dial_upgrade_error(
+  fn on_connection_event(
     &mut self,
-    _: Self::OutboundOpenInfo,
-    error: ConnectionHandlerUpgrErr<
-      <Self::OutboundProtocol as OutboundUpgrade<NegotiatedSubstream>>::Error,
+    event: ConnectionEvent<
+        Self::InboundProtocol,
+        Self::OutboundProtocol,
+        Self::InboundOpenInfo,
+        Self::OutboundOpenInfo,
     >,
-  ) {
-    warn!("dial upgrade error: {:?}", error);
-  }
+){
 
-  fn connection_keep_alive(&self) -> KeepAlive {
-    self.keep_alive
+  match  event{
+  
+    ConnectionEvent::FullyNegotiatedInbound( FullyNegotiatedInbound{protocol,info:_})=>
+    {
+      self.inbound_substream =
+      Some(InboundSubstreamState::WaitingInput(protocol))
+    },
+    ConnectionEvent::FullyNegotiatedOutbound(FullyNegotiatedOutbound{protocol,info:_})=>
+    {
+      self.outbound_substream =
+      Some(OutboundSubstreamState::WaitingOutput(protocol));
+    },
+    ConnectionEvent:: DialUpgradeError(DialUpgradeError{info:_, error}) =>
+    {
+      warn!("dial upgrade error: {:?}", error);
+    },
+    ConnectionEvent::ListenUpgradeError(ListenUpgradeError{info:_,error})=>
+    {
+      warn!("listen upgrade error: {:?}", error);
+    },
+    ConnectionEvent::AddressChange(_a)=>
+    {
+
+    },
+    ConnectionEvent::LocalProtocolsChange(_p)=>{
+    },
+    ConnectionEvent::RemoteProtocolsChange(_p)=>
+    {},
+    _ =>{}
   }
+}
+
+fn connection_keep_alive(&self) -> bool {
+  self.keep_alive
+}
 
   fn poll(&mut self, cx: &mut Context<'_>) -> Poll<EpisubHandlerEvent> {
     // process inbound stream first
@@ -182,7 +198,7 @@ impl EpisubHandler {
             Poll::Ready(Some(Ok(message))) => {
               self.inbound_substream =
                 Some(InboundSubstreamState::WaitingInput(substream));
-              return Poll::Ready(ConnectionHandlerEvent::Custom(message));
+              return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(message));
             }
             Poll::Ready(Some(Err(error))) => {
               warn!("inbound stream error: {:?}", error);
@@ -210,7 +226,7 @@ impl EpisubHandler {
               }
               self.inbound_substream = None;
               if self.outbound_substream.is_none() {
-                self.keep_alive = KeepAlive::No;
+                self.keep_alive = false;
               }
               break;
             }
@@ -268,16 +284,18 @@ impl EpisubHandler {
                 }
                 Err(e) => {
                   error!("Error sending message: {}", e);
-                  return Poll::Ready(ConnectionHandlerEvent::Close(e));
+                  self.keep_alive=false;                  
+                  return Poll::Ready(ConnectionHandlerEvent::ReportRemoteProtocols(ProtocolSupport::Removed( vec![StreamProtocol::new("/beta/episub/1.0.0")].into_iter().collect())))
                 }
               }
             }
             Poll::Ready(Err(e)) => {
               error!("outbound substream error while sending message: {:?}", e);
-              return Poll::Ready(ConnectionHandlerEvent::Close(e));
+              self.keep_alive=false;
+              return Poll::Ready(ConnectionHandlerEvent::ReportRemoteProtocols(ProtocolSupport::Removed( vec![StreamProtocol::new("/beta/episub/1.0.0")].into_iter().collect())))
             }
             Poll::Pending => {
-              self.keep_alive = KeepAlive::Yes;
+              self.keep_alive = true;
               self.outbound_substream =
                 Some(OutboundSubstreamState::PendingSend(substream, message));
               break;
@@ -290,11 +308,12 @@ impl EpisubHandler {
               self.outbound_substream =
                 Some(OutboundSubstreamState::WaitingOutput(substream));
             }
-            Poll::Ready(Err(e)) => {
-              return Poll::Ready(ConnectionHandlerEvent::Close(e))
+            Poll::Ready(Err(_e)) => {
+              self.keep_alive=false;
+              return Poll::Ready(ConnectionHandlerEvent::ReportRemoteProtocols(ProtocolSupport::Removed( vec![StreamProtocol::new("/beta/episub/1.0.0")].into_iter().collect())))        
             }
             Poll::Pending => {
-              self.keep_alive = KeepAlive::Yes;
+              self.keep_alive = true;
               self.outbound_substream =
                 Some(OutboundSubstreamState::PendingFlush(substream));
               break;
@@ -306,22 +325,17 @@ impl EpisubHandler {
             Poll::Ready(Ok(())) => {
               self.outbound_substream = None;
               if self.inbound_substream.is_none() {
-                self.keep_alive = KeepAlive::No;
+                self.keep_alive = false;
               }
               break;
             }
             Poll::Ready(Err(e)) => {
               warn!("Outbound substream error while closing: {:?}", e);
-              return Poll::Ready(ConnectionHandlerEvent::Close(
-                io::Error::new(
-                  io::ErrorKind::BrokenPipe,
-                  "Failed to close outbound substream",
-                )
-                .into(),
-              ));
+              self.keep_alive = false;
+              return Poll::Ready(ConnectionHandlerEvent::ReportRemoteProtocols(ProtocolSupport::Removed( vec![StreamProtocol::new("/beta/episub/1.0.0")].into_iter().collect())))
             }
             Poll::Pending => {
-              self.keep_alive = KeepAlive::No;
+              self.keep_alive =false;
               self.outbound_substream =
                 Some(OutboundSubstreamState::_Closing(substream));
               break;

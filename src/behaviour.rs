@@ -1,25 +1,51 @@
-use crate::{
-  config::Config, error::PublishError, handler::EpisubHandler, rpc,
-  topic::TopicMesh, view::AddressablePeer,
-};
-use futures::FutureExt;
-use libp2p_core::multiaddr::Protocol;
-use libp2p_core::{
-  connection::{ConnectionId, ListenerId},
-  ConnectedPoint, Multiaddr, PeerId,
-};
-use libp2p_swarm::{
-  CloseConnection, DialError, NetworkBehaviour, NetworkBehaviourAction,
-  NotifyHandler, PollParameters,
-};
-use rand::Rng;
 use std::{
   collections::{HashMap, HashSet, VecDeque},
   iter,
   net::{Ipv4Addr, Ipv6Addr},
   task::{Context, Poll},
 };
+
+use futures::FutureExt;
+use libp2p_core::{
+  multiaddr::Protocol,
+  transport::ListenerId,
+  ConnectedPoint,
+  Endpoint,
+  Multiaddr,
+};
+use libp2p_identity::PeerId;
+
+use libp2p_swarm::FromSwarm::{
+  ConnectionClosed,
+  ConnectionEstablished,
+  DialFailure,
+  ExpiredListenAddr,
+  ExternalAddrConfirmed,
+  NewListenAddr,
+  NewExternalAddrCandidate,
+  ExternalAddrExpired
+};
+use libp2p_swarm::{
+  CloseConnection,
+  ConnectionDenied,
+  ConnectionId, 
+  DialError,
+  FromSwarm,
+  NetworkBehaviour,
+  NotifyHandler,
+  ToSwarm,
+};
+use rand::Rng;
 use tracing::{debug, info, trace, warn};
+
+use crate::{
+  config::Config,
+  error::PublishError,
+  handler::EpisubHandler,
+  rpc,
+  topic::TopicMesh,
+  view::AddressablePeer,
+};
 
 /// Event that can be emitted by the episub behaviour.
 #[derive(Debug)]
@@ -35,8 +61,7 @@ pub enum EpisubEvent {
   PeerRemoved(PeerId),
 }
 
-pub(crate) type EpisubNetworkBehaviourAction =
-  NetworkBehaviourAction<EpisubEvent, EpisubHandler, rpc::Rpc>;
+pub(crate) type EpisubNetworkBehaviourAction = ToSwarm<EpisubEvent, rpc::Rpc>;
 
 /// Network behaviour that handles the Episub protocol.
 ///
@@ -50,7 +75,7 @@ pub struct Episub {
   config: Config,
 
   /// Identity of this node
-  local_node: Option<AddressablePeer>,
+  local_node: Option<AddressablePeer>, /* the Option should be removed once the deprecated new() ctor is gone */
 
   /// Per-topic node membership
   topics: HashMap<String, TopicMesh>,
@@ -81,10 +106,29 @@ pub struct Episub {
 }
 
 impl Episub {
+  // since PollParameters are removed there is no way to learn the local peer_id
+  // later on if not passed on construction here
+  #[deprecated]
   pub fn new(config: Config) -> Self {
     Self {
       config,
       local_node: None,
+      topics: HashMap::new(),
+      peer_addresses: HashMap::new(),
+      banned_peers: HashSet::new(),
+      pending_topics: HashSet::new(),
+      out_events: VecDeque::new(),
+      early_peers: HashSet::new(),
+    }
+  }
+
+  pub fn new1(config: Config, local_peer: PeerId) -> Self {
+    Self {
+      config,
+      local_node: Some(AddressablePeer {
+        peer_id: local_peer,
+        addresses: HashSet::new(),
+      }),
       topics: HashMap::new(),
       peer_addresses: HashMap::new(),
       banned_peers: HashSet::new(),
@@ -109,7 +153,7 @@ impl Episub {
   fn send_message(&mut self, peer_id: PeerId, message: rpc::Rpc) {
     self
       .out_events
-      .push_back(NetworkBehaviourAction::NotifyHandler {
+      .push_back(EpisubNetworkBehaviourAction::NotifyHandler {
         peer_id,
         event: message,
         handler: NotifyHandler::Any,
@@ -140,15 +184,19 @@ impl Episub {
     } else {
       debug!("Subscribing to topic: {}", topic);
       if let Some(ref node) = self.local_node {
-        self.topics.insert(
-          topic.clone(),
-          TopicMesh::new(topic.clone(), self.config.clone(), node.clone()),
-        );
-        self
-          .out_events
-          .push_back(EpisubNetworkBehaviourAction::GenerateEvent(
-            EpisubEvent::Subscribed(topic),
-          ));
+        if !node.addresses.is_empty() {
+          self.topics.insert(
+            topic.clone(),
+            TopicMesh::new(topic.clone(), self.config.clone(), node.clone()),
+          );
+          self.out_events.push_back(
+            EpisubNetworkBehaviourAction::GenerateEvent(
+              EpisubEvent::Subscribed(topic),
+            ),
+          );
+        } else {
+          self.pending_topics.insert(topic);
+        }
       } else {
         self.pending_topics.insert(topic);
       }
@@ -211,21 +259,83 @@ impl Episub {
   }
 }
 
-impl NetworkBehaviour for Episub {
-  type ConnectionHandler = EpisubHandler;
-  type OutEvent = EpisubEvent;
+impl Episub {
+  fn on_connection_closed(
+    &mut self,
+    libp2p_swarm::behaviour::ConnectionClosed {
+      ref peer_id,
+      endpoint,
+      ..
+    }: libp2p_swarm::behaviour::ConnectionClosed,
+  ) {
+    debug!(
+      "Connection to peer {} closed on endpoint {:?}",
+      peer_id, endpoint
+    );
 
-  fn new_handler(&mut self) -> Self::ConnectionHandler {
-    EpisubHandler::new(self.config.max_transmit_size, false)
+    for (_, mesh) in self.topics.iter_mut() {
+      // remove from active keep in passive
+      mesh.disconnected(*peer_id, true);
+    }
   }
 
-  fn inject_connection_established(
+  fn on_expired_listen_addr(
     &mut self,
-    peer_id: &PeerId,
-    connection: &ConnectionId,
-    endpoint: &ConnectedPoint,
-    _failed_addresses: Option<&Vec<Multiaddr>>,
-    _other_established: usize,
+    libp2p_swarm::behaviour::ExpiredListenAddr {
+      listener_id: _,
+      addr,
+    }: libp2p_swarm::behaviour::ExpiredListenAddr,
+  ) {
+    if let Some(node) = self.local_node.as_mut() {
+      node.addresses.retain(|a| a != addr);
+    }
+  }
+
+  fn on_new_listen_addr(
+    &mut self,
+    libp2p_swarm::NewListenAddr { addr, .. }: libp2p_swarm::NewListenAddr<'_>,
+  ) {
+    // it does not make sense to advertise localhost addresses to remote nodes
+    if !is_local_address(addr) {
+      if let Some(node) = self.local_node.as_mut() {
+        node.addresses.insert(addr.clone());
+        self.drain_pending_topics();
+        self.join_early_peers();
+      } else {
+        unreachable!();
+        // this can only happen if Episub was constructed without peer_id
+        // let p = parse addr for P2P protocol /p2p/..sth otherwise default
+        // self.local_node = Some(AddressablePeer{peer_id: p,addresses:
+        // HashSet::from(addr.clone()) } )
+      }
+    }
+  }
+
+  fn on_dial_failure(
+    &mut self,
+    libp2p_swarm::DialFailure { error, peer_id, .. }: libp2p_swarm::DialFailure<
+      '_,
+    >,
+  ) {
+    if !matches!(error, DialError::DialPeerConditionFalse(_)) {
+      if let Some(peer_id) = peer_id {
+        debug!("Dialing peer {} failed: {:?}", peer_id, error);
+        for (_, mesh) in self.topics.iter_mut() {
+          // remove from active and passive
+          mesh.disconnected(peer_id, false);
+        }
+      }
+    }
+  }
+
+  fn on_connection_established(
+    &mut self,
+    libp2p_swarm::behaviour::ConnectionEstablished {
+      ref peer_id,
+      connection_id: ref connection,
+      endpoint,
+      ..
+    }: libp2p_swarm::behaviour::ConnectionEstablished,
   ) {
     if self.banned_peers.contains(peer_id) {
       self.force_disconnect(*peer_id, *connection);
@@ -263,7 +373,9 @@ impl NetworkBehaviour for Episub {
       if self.local_node.is_some() {
         // for each topic that hasn't enough active nodes,
         // send a join request to any dialer
-        self.request_join_for_starving_topics(*peer_id);
+        if !self.local_node.as_ref().unwrap().addresses.is_empty() {
+          self.request_join_for_starving_topics(*peer_id);
+        }
       } else {
         // otherwise keep note of this peer and send a join
         // request when we know who we are.
@@ -272,61 +384,134 @@ impl NetworkBehaviour for Episub {
     }
   }
 
-  fn inject_new_listen_addr(&mut self, _id: ListenerId, addr: &Multiaddr) {
-    // it does not make sense to advertise localhost addresses to remote nodes
+  fn on_external_addr_confirmed(
+    &mut self,
+    libp2p_swarm::behaviour::ExternalAddrConfirmed{addr} : libp2p_swarm::behaviour::ExternalAddrConfirmed,
+  ) {
     if !is_local_address(addr) {
       if let Some(node) = self.local_node.as_mut() {
         node.addresses.insert(addr.clone());
+        self.drain_pending_topics();
+        self.join_early_peers();
+      } else {
+        unreachable!();
+        // this can only happen if Episub was constructed without peer_id
+        // let p = parse addr for P2P protocol /p2p/..sth otherwise default
+        // self.local_node = Some(AddressablePeer{peer_id: p,addresses:
+        // HashSet::from(addr.clone()) } )
       }
     }
   }
 
-  fn inject_expired_listen_addr(&mut self, _id: ListenerId, addr: &Multiaddr) {
-    if let Some(node) = self.local_node.as_mut() {
-      node.addresses.retain(|a| a != addr);
-    }
-  }
-
-  fn inject_dial_failure(
+  fn on_external_addr_candidate(
     &mut self,
-    peer_id: Option<PeerId>,
-    _: Self::ConnectionHandler,
-    error: &DialError,
+    libp2p_swarm::behaviour::NewExternalAddrCandidate{addr} : libp2p_swarm::behaviour::NewExternalAddrCandidate,
   ) {
-    if !matches!(error, DialError::DialPeerConditionFalse(_)) {
-      if let Some(peer_id) = peer_id {
-        debug!("Dialing peer {} failed: {:?}", peer_id, error);
-        for (_, mesh) in self.topics.iter_mut() {
-          // remove from active and passive
-          mesh.disconnected(peer_id, false);
-        }
+    if !is_local_address(addr) {
+      if let Some(node) = self.local_node.as_mut() {
+        node.addresses.insert(addr.clone());
+        self.drain_pending_topics();
+        self.join_early_peers();
+      } else {
+        unreachable!();
+        // this can only happen if Episub was constructed without peer_id
+        // let p = parse addr for P2P protocol /p2p/..sth otherwise default
+        // self.local_node = Some(AddressablePeer{peer_id: p,addresses:
+        // HashSet::from(addr.clone()) } )
       }
     }
   }
 
-  fn inject_connection_closed(
-    &mut self,
-    peer_id: &PeerId,
-    _: &ConnectionId,
-    endpoint: &ConnectedPoint,
-    _: EpisubHandler,
-    _remaining_established: usize,
-  ) {
-    debug!(
-      "Connection to peer {} closed on endpoint {:?}",
-      peer_id, endpoint
-    );
-
-    for (_, mesh) in self.topics.iter_mut() {
-      // remove from active keep in passive
-      mesh.disconnected(*peer_id, true);
+  fn on_external_addr_expired(&mut self,  libp2p_swarm::behaviour::ExternalAddrExpired{addr} : libp2p_swarm::behaviour::ExternalAddrExpired)
+  {
+    if !is_local_address(addr) {
+      if let Some(node) = self.local_node.as_mut() {
+        node.addresses.remove(addr);
+        
+      } else {
+        unreachable!();
+        // this can only happen if Episub was constructed without peer_id
+        // let p = parse addr for P2P protocol /p2p/..sth otherwise default
+        // self.local_node = Some(AddressablePeer{peer_id: p,addresses:
+        // HashSet::from(addr.clone()) } )
+      }
     }
   }
 
-  /// Invoked on every message from the protocol for active connections with peers.
-  /// Does basic validation only and forwards those calls to their appropriate handlers
-  /// in HyParView or Plumtree
-  fn inject_event(
+}
+
+impl NetworkBehaviour for Episub {
+  type ConnectionHandler = EpisubHandler;
+  type ToSwarm = EpisubEvent;
+
+  /// Informs the behaviour about an event from the [`Swarm`](crate::Swarm).
+  fn on_swarm_event(&mut self, event: FromSwarm) {
+    match event {
+      ConnectionEstablished(c) => {
+        self.on_connection_established(c);
+      }
+      ConnectionClosed(c) => {
+        self.on_connection_closed(c);
+      }
+      ExpiredListenAddr(c) => {
+        self.on_expired_listen_addr(c);
+      }
+      ExternalAddrConfirmed(c) => {
+        self.on_external_addr_confirmed(c);
+      }
+      NewExternalAddrCandidate(c)=>{
+        self.on_external_addr_candidate(c);
+      }
+      ExternalAddrExpired(c) => {
+        self.on_external_addr_expired(c);
+      }
+
+      NewListenAddr(c) => self.on_new_listen_addr(c),
+      DialFailure(c) => {
+        self.on_dial_failure(c);
+      }
+      _ => {}
+    }
+  }
+
+  fn handle_established_outbound_connection(
+    &mut self,
+    _connection_id: ConnectionId,
+    peer: PeerId,
+    addr: &Multiaddr,
+    role_override: Endpoint,
+  ) -> Result<EpisubHandler, ConnectionDenied> {
+    Ok(EpisubHandler::new(self.config.max_transmit_size, false))
+  }
+
+  fn handle_established_inbound_connection(
+    &mut self,
+    _connection_id: ConnectionId,
+    peer: PeerId,
+    local_addr: &Multiaddr,
+    remote_addr: &Multiaddr,
+  ) -> Result<EpisubHandler, ConnectionDenied> {
+    Ok(EpisubHandler::new(self.config.max_transmit_size, false))
+  }
+
+  fn handle_pending_inbound_connection(
+    &mut self,
+    _connection_id: ConnectionId,
+    _local_addr: &Multiaddr,
+    _remote_addr: &Multiaddr,
+  ) -> Result<(), ConnectionDenied> {
+    // if self.banned_peers.contains(peer_id) {
+    //
+    // debug!(
+    // "Rejected connection from banned peer {} on endpoint {:?}",
+    // peer_id, endpoint
+    // );
+    // return ConnectionDenied;
+    // }
+    Ok(())
+  }
+
+  fn on_connection_handler_event(
     &mut self,
     peer_id: PeerId,
     connection: ConnectionId,
@@ -397,10 +582,7 @@ impl NetworkBehaviour for Episub {
   fn poll(
     &mut self,
     cx: &mut Context<'_>,
-    params: &mut impl PollParameters,
-  ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ConnectionHandler>> {
-    // update local peer identity and addresses
-    self.update_local_node_info(params);
+  ) -> Poll<ToSwarm<EpisubEvent, rpc::Rpc>> {
 
     // bubble up any outstanding behaviour-level events in fifo order
     if let Some(event) = self.out_events.pop_front() {
@@ -421,55 +603,37 @@ impl NetworkBehaviour for Episub {
 }
 
 impl Episub {
-  /// updates our own information abount ourselves.
-  /// This includes our own peer id, the addresses we are listening on
-  /// and any external addresses we are aware of. Excludes any localhost
-  /// addresses
-  fn update_local_node_info(&mut self, params: &impl PollParameters) {
-    if self.local_node.is_none() {
-      let addresses: HashSet<_> = params
-        .external_addresses()
-        .map(|ad| ad.addr)
-        .chain(params.listened_addresses())
-        .filter(|a| !is_local_address(a))
-        .collect();
 
-      if !addresses.is_empty() {
-        self.local_node.replace(AddressablePeer {
-          peer_id: *params.local_peer_id(),
-          addresses,
-        });
+  fn join_early_peers(&mut self) {
+    // request JOINS for peers that have been dialed before we started
+    // listening and knew our identity.
+    //
+    // because both references to self are mut,
+    // this works around the borrow checker,
+    // although the actual fields in self.early_peers
+    // and the ones accessed by self.request_join...()
+    // are disjoin, the compiler is seeing it as double
+    // mut borrow to self.
+    #[allow(clippy::needless_collect)]
+    let early_peers: Vec<PeerId> = self.early_peers.drain().collect();
+    early_peers
+      .into_iter()
+      .for_each(|p| self.request_join_for_starving_topics(p));
+  }
 
-        for topic in self.pending_topics.drain() {
-          // for any subscripts requested before we
-          // we knew about our own peer identity and
-          // addresses
-          if !self.topics.contains_key(&topic) {
-            self.topics.insert(
-              topic.clone(),
-              TopicMesh::new(
-                topic.clone(),
-                self.config.clone(),
-                self.local_node.as_ref().unwrap().clone(),
-              ),
-            );
-          }
-        }
-
-        // request JOINS for peers that have been dialed before we started
-        // listening and knew our identity.
-
-        // because both references to self are mut,
-        // this works around the borrow checker,
-        // although the actual fields in self.early_peers
-        // and the ones accessed by self.request_join...()
-        // are disjoin, the compiler is seeing it as double
-        // mut borrow to self.
-        #[allow(clippy::needless_collect)]
-        let early_peers: Vec<PeerId> = self.early_peers.drain().collect();
-        early_peers
-          .into_iter()
-          .for_each(|p| self.request_join_for_starving_topics(p));
+  fn drain_pending_topics(&mut self) {
+    for topic in self.pending_topics.drain() {
+      // for any subscripts requested before we
+      // we knew about our own peer identity and addresses
+      if !self.topics.contains_key(&topic) {
+        self.topics.insert(
+          topic.clone(),
+          TopicMesh::new(
+            topic.clone(),
+            self.config.clone(),
+            self.local_node.as_ref().unwrap().clone(),
+          ),
+        );
       }
     }
   }
