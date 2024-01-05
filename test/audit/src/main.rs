@@ -94,13 +94,14 @@ async fn ws_handler(
       while subscriber.changed().await.is_ok() {
         let val = *subscriber.borrow();
         trace!("websocket stream value changed: {:?}", val);
-
-        #[allow(unaligned_references)]
+        
+        let nid = val.node_id;
+        let pid = val.peer_id;
         if let Err(err) = socket
           .send(Message::Text(
             serde_json::to_string(&json!({
-              "node_id": val.node_id.to_base58(),
-              "peer_id": val.peer_id.to_base58(),
+              "node_id": nid.to_base58(),
+              "peer_id": pid.to_base58(),
               "event": val.event
             }))
             .unwrap(),
